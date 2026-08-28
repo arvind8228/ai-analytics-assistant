@@ -1,0 +1,25 @@
+{
+    "random_seed": 42,
+    "dataset_size": {
+        "customers": 5000,
+        "stores": 6,
+        "categories": 8,
+        "products": 400,
+        "orders": 25000,
+        "promotions": 15
+    },
+    "date_range": {
+        "start_date": "2025-01-01",
+        "end_date": "2026-07-31",
+        "analysis_reference_date": "2026-08-01"
+    },
+    "generation_rules": {
+        "cancelled_order_rate": 0.08,
+        "promotion_usage_rate": 0.25,
+        "return_item_rate": 0.07,
+        "min_items_per_order": 1,
+        "max_items_per_order": 5,
+        "min_item_quantity": 1,
+        "max_item_quantity": 3
+    }
+}

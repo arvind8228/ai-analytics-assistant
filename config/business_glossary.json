@@ -1,0 +1,59 @@
+{
+    "gross_sales": {
+        "definition": "Total item value before discounts and refunds.",
+        "calculation": "SUM(unit_price * quantity)",
+        "rules": [
+            "Only completed orders are included."
+        ]
+    },
+    "discount_amount": {
+        "definition": "Total discounts applied to completed order items.",
+        "calculation": "SUM(discount_amount)",
+        "rules": [
+            "Only completed orders are included."
+        ]
+    },
+    "refund_amount": {
+        "definition": "Total amount refunded for returned items.",
+        "calculation": "SUM(refund_amount)",
+        "rules": [
+            "Refunds come from the returns table."
+        ]
+    },
+    "net_revenue": {
+        "definition": "Revenue after discounts and refunds.",
+        "calculation": "gross_sales - discount_amount - refund_amount",
+        "rules": [
+            "Cancelled orders are excluded.",
+            "Revenue in this project means net revenue unless the user asks for gross sales."
+        ]
+    },
+    "order_count": {
+        "definition": "Number of completed customer orders.",
+        "calculation": "COUNT(DISTINCT order_id)",
+        "rules": [
+            "Cancelled orders are excluded."
+        ]
+    },
+    "average_order_value": {
+        "definition": "Average net revenue generated per completed order.",
+        "calculation": "net_revenue / order_count",
+        "rules": [
+            "Cancelled orders are excluded."
+        ]
+    },
+    "repeat_customer": {
+        "definition": "A customer with at least two completed orders in the selected period.",
+        "calculation": "completed order count >= 2",
+        "rules": [
+            "The selected analysis period must be applied before counting orders."
+        ]
+    },
+    "active_customer": {
+        "definition": "A customer with at least one completed order in the selected period.",
+        "calculation": "completed order count >= 1",
+        "rules": [
+            "The selected analysis period must be applied before counting orders."
+        ]
+    }
+}

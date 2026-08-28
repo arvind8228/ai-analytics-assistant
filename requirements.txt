@@ -1,0 +1,4 @@
+pandas==3.0.5
+numpy==2.5.2
+Faker==40.37.0
+psycopg[binary]==3.3.4
