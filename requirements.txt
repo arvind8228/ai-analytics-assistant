@@ -2,3 +2,6 @@ pandas==3.0.5
 numpy==2.5.2
 Faker==40.37.0
 psycopg[binary]==3.3.4
+openai==3.6.0
+python-dotenv==1.2.3
+pydantic==2.13.5
