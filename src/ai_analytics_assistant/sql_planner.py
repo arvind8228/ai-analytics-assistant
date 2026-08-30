@@ -1,0 +1,529 @@
+import json
+import os
+from enum import Enum
+from pathlib import Path
+
+from openai import OpenAI
+from pydantic import BaseModel, ConfigDict, model_validator
+
+from .database import get_schema_context
+from .question_analyzer import (
+    QuestionAnalysis,
+    QuestionStatus,
+)
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+SQL_PLANNER_VERSION = "sql_planner_v1"
+SQL_GENERATOR_VERSION = "sql_generator_v1"
+
+
+class JoinType(str, Enum):
+    INNER = "INNER"
+    LEFT = "LEFT"
+
+
+class FilterOperator(str, Enum):
+    EQ = "EQ"
+    NE = "NE"
+    GT = "GT"
+    GTE = "GTE"
+    LT = "LT"
+    LTE = "LTE"
+    IN = "IN"
+    NOT_IN = "NOT_IN"
+    BETWEEN = "BETWEEN"
+    IS_NULL = "IS_NULL"
+    IS_NOT_NULL = "IS_NOT_NULL"
+
+
+class SortDirection(str, Enum):
+    ASC = "ASC"
+    DESC = "DESC"
+
+
+class SQLJoin(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    left_table: str
+    right_table: str
+    left_column: str
+    right_column: str
+    join_type: JoinType
+
+
+class SQLFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    column: str
+    operator: FilterOperator
+    values: list[str]
+
+    @model_validator(mode="after")
+    def validate_filter(self):
+        null_operators = {
+            FilterOperator.IS_NULL,
+            FilterOperator.IS_NOT_NULL,
+        }
+
+        scalar_operators = {
+            FilterOperator.EQ,
+            FilterOperator.NE,
+            FilterOperator.GT,
+            FilterOperator.GTE,
+            FilterOperator.LT,
+            FilterOperator.LTE,
+        }
+
+        if self.operator in null_operators:
+            if self.values:
+                raise ValueError(
+                    "NULL filters must not contain values."
+                )
+
+        elif self.operator == FilterOperator.BETWEEN:
+            if len(self.values) != 2:
+                raise ValueError(
+                    "BETWEEN requires exactly two values."
+                )
+
+        elif self.operator in scalar_operators:
+            if len(self.values) != 1:
+                raise ValueError(
+                    "Scalar filters require exactly one value."
+                )
+
+        elif not self.values:
+            raise ValueError(
+                "IN and NOT_IN require at least one value."
+            )
+
+        return self
+
+
+class SQLOrder(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field: str
+    direction: SortDirection
+
+
+class SQLTimePeriod(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    column: str
+    start_date: str
+    end_date: str
+
+
+class SQLPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    objective: str
+
+    metric: str | None
+    entity: str | None
+
+    required_tables: list[str]
+    joins: list[SQLJoin]
+    filters: list[SQLFilter]
+
+    dimensions: list[str]
+    group_by: list[str]
+    order_by: list[SQLOrder]
+    limit: int | None
+
+    time_period: SQLTimePeriod | None
+
+    assumptions: list[str]
+
+    @model_validator(mode="after")
+    def validate_plan(self):
+        if not self.required_tables:
+            raise ValueError(
+                "SQLPlan requires at least one table."
+            )
+
+        if self.limit is not None and self.limit < 1:
+            raise ValueError(
+                "SQLPlan limit must be greater than zero."
+            )
+
+        return self
+
+
+class GeneratedSQL(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sql: str
+
+
+def load_sql_context():
+    schema_context = get_schema_context()
+
+    with open(
+        PROJECT_ROOT / "config" / "business_glossary.json",
+        "r",
+    ) as file:
+        business_glossary = json.load(file)
+
+    return schema_context, business_glossary
+
+
+def create_sql_plan(
+    question: str,
+    analysis: QuestionAnalysis,
+) -> SQLPlan:
+
+    if analysis.status != QuestionStatus.ANSWERABLE:
+        raise ValueError(
+            "SQL planning is only allowed for "
+            "ANSWERABLE questions."
+        )
+
+    schema_context, business_glossary = (
+        load_sql_context()
+    )
+
+    instructions = f"""
+You are the SQL planning layer of an AI analytics assistant.
+
+Your task is to convert an APPROVED business-question analysis into
+a structured SQL plan.
+
+Do NOT generate SQL.
+
+The plan will later be passed to a separate SQL generator and
+deterministic SQL validator.
+
+
+PLANNING RULES
+
+1. APPROVED ANALYSIS
+
+Treat the supplied question analysis as the approved business
+interpretation.
+
+Do not reclassify the question.
+
+Do not introduce a new interpretation that conflicts with the
+approved analysis.
+
+
+2. DATABASE SCHEMA
+
+Use only tables and columns that exist in the supplied PostgreSQL
+schema.
+
+Do not invent:
+- tables
+- columns
+- relationships
+- status values
+
+
+3. BUSINESS METRICS
+
+Use the documented business glossary when planning metrics.
+
+Preserve the documented business meaning of metrics such as:
+- net_revenue
+- gross_sales
+- discount_amount
+- refund_amount
+- order_count
+- average_order_value
+
+
+4. TABLES
+
+required_tables must contain every table required to answer the
+question and no unrelated tables.
+
+
+5. JOINS
+
+Create joins only when multiple tables are required.
+
+Every join must correspond to a real relationship in the supplied
+schema.
+
+Prefer the smallest set of joins required to answer the question.
+
+
+6. FILTERS
+
+Represent non-date restrictions using structured filters.
+
+Examples include:
+- completed order status
+- store
+- category
+- product
+- region
+
+
+7. TIME PERIODS
+
+When the approved analysis contains a concrete date range,
+represent it using SQLTimePeriod.
+
+Use the actual database date column that should enforce the period.
+
+Do not duplicate the same date restriction inside filters.
+
+
+8. GROUPING
+
+Use dimensions and group_by only when the requested answer requires
+results split by an entity or category.
+
+Do not add grouping to a question asking for one aggregate value.
+
+
+9. ORDERING
+
+Use order_by only when ordering is required.
+
+For ranking requests, preserve the approved ranking direction.
+
+
+10. LIMITS
+
+Use the approved or harmless-default result limit for ranking
+requests when appropriate.
+
+Do not add a limit to a single aggregate result unless needed.
+
+
+11. ASSUMPTIONS
+
+Do not introduce unnecessary assumptions.
+
+If the approved analysis already resolved a documented default,
+preserve that interpretation rather than recording it again as a
+new planning assumption.
+
+
+12. SAFETY
+
+This planner is strictly read-only.
+
+Never create a plan for:
+- INSERT
+- UPDATE
+- DELETE
+- DROP
+- ALTER
+- CREATE
+- TRUNCATE
+- database administration
+
+
+DATABASE SCHEMA
+
+{schema_context}
+
+
+BUSINESS GLOSSARY
+
+{json.dumps(business_glossary, indent=2)}
+""".strip()
+
+    approved_context = {
+        "user_question": question,
+        "approved_analysis": analysis.model_dump(
+            mode="json"
+        ),
+    }
+
+    client = OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        timeout=20.0,
+        max_retries=2,
+    )
+
+    response = client.responses.parse(
+        model=os.getenv("OPENAI_MODEL"),
+        instructions=instructions,
+        input=json.dumps(
+            approved_context,
+            indent=2,
+        ),
+        text_format=SQLPlan,
+        store=False,
+    )
+
+    if response.output_parsed is None:
+        raise ValueError(
+            "SQL planner returned no parsed output."
+        )
+
+    return response.output_parsed
+
+
+def generate_sql(
+    plan: SQLPlan,
+) -> GeneratedSQL:
+
+    schema_context, business_glossary = (
+        load_sql_context()
+    )
+
+    instructions = f"""
+You are the PostgreSQL generation layer of an AI analytics assistant.
+
+Your only task is to translate an APPROVED structured SQL plan into
+one PostgreSQL read-only query.
+
+Do not reinterpret the original business question.
+
+Follow the structured plan exactly.
+
+
+GENERATION RULES
+
+1. POSTGRESQL
+
+Generate PostgreSQL syntax only.
+
+
+2. READ-ONLY QUERY
+
+Generate exactly one read-only query.
+
+Allowed top-level forms:
+- SELECT
+- WITH ... SELECT
+
+Never generate:
+- INSERT
+- UPDATE
+- DELETE
+- DROP
+- ALTER
+- CREATE
+- TRUNCATE
+- MERGE
+- CALL
+- COPY
+- transaction commands
+- administrative commands
+
+
+3. APPROVED PLAN
+
+Use the structured SQL plan as the source of truth.
+
+Do not:
+- add new business assumptions
+- change the requested metric
+- change the requested filters
+- change the requested time period
+- introduce unrelated tables
+
+
+4. DATABASE SCHEMA
+
+Use only tables and columns that exist in the supplied schema.
+
+Do not invent schema objects.
+
+
+5. BUSINESS METRICS
+
+Follow the documented business glossary exactly.
+
+Preserve documented definitions for metrics such as:
+- net_revenue
+- gross_sales
+- discount_amount
+- refund_amount
+- order_count
+- average_order_value
+
+
+6. JOINS
+
+Use only joins required by the approved plan.
+
+Use real relationships from the database schema.
+
+
+7. FILTERS
+
+Translate structured filters into PostgreSQL predicates.
+
+Preserve documented values exactly, including lowercase status
+values such as 'completed' and 'cancelled'.
+
+
+8. TIME PERIODS
+
+Use the approved start and end dates exactly.
+
+For DATE columns, use an inclusive date range unless the plan
+specifies otherwise.
+
+
+9. AGGREGATION
+
+Use aggregation, GROUP BY and ordering only when required by
+the plan.
+
+For order_count, preserve the documented meaning of distinct
+completed orders.
+
+
+10. RESULT LIMIT
+
+Apply LIMIT only when the approved plan contains a limit.
+
+
+11. OUTPUT
+
+Return only the structured GeneratedSQL response.
+
+The sql field must contain exactly one PostgreSQL query.
+
+Do not include:
+- Markdown fences
+- explanations
+- comments
+- alternative queries
+
+
+DATABASE SCHEMA
+
+{schema_context}
+
+
+BUSINESS GLOSSARY
+
+{json.dumps(business_glossary, indent=2)}
+""".strip()
+
+    client = OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        timeout=20.0,
+        max_retries=2,
+    )
+
+    response = client.responses.parse(
+        model=os.getenv("OPENAI_MODEL"),
+        instructions=instructions,
+        input=json.dumps(
+            plan.model_dump(mode="json"),
+            indent=2,
+        ),
+        text_format=GeneratedSQL,
+        store=False,
+    )
+
+    if response.output_parsed is None:
+        raise ValueError(
+            "SQL generator returned no parsed output."
+        )
+
+    return response.output_parsed
