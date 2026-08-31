@@ -11,7 +11,7 @@ from .database import get_schema_context
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-QUESTION_ANALYZER_VERSION = "question_analyzer_v1"
+QUESTION_ANALYZER_VERSION = "question_analyzer_v2"
 
 
 class QuestionStatus(str, Enum):
@@ -235,6 +235,62 @@ REJECTED_UNSAFE
 DECISION RULES
 
 
+0. DECISION PRECEDENCE
+
+Apply decision types in this order:
+
+REJECTED_UNSAFE
+UNANSWERABLE
+NEEDS_CLARIFICATION
+ANSWERABLE
+
+Before asking for clarification, determine whether supplying the
+missing metric, time period, entity or scope could actually make the
+request answerable using the available data and project capabilities.
+
+If the request would remain impossible even after clarification,
+choose UNANSWERABLE instead of NEEDS_CLARIFICATION.
+
+Do not ask the user to clarify details that cannot make an unsupported
+request answerable.
+
+Causal diagnosis is not an available capability in this project.
+
+Transactional data may describe what changed, where it changed, when
+it changed and patterns associated with the change, but it cannot
+establish why an outcome occurred or prove causation.
+
+Example:
+
+"Why did sales decrease in a particular region?"
+
+The region and comparison period are unspecified, but even if the
+user supplied them, this project could not establish the cause of the
+decrease.
+
+This is:
+
+UNANSWERABLE
+
+Reason code:
+
+MISSING_CAPABILITY
+
+For an UNANSWERABLE request, missing_information should contain only
+the unavailable data or capability that prevents an answer.
+
+Do not place resolvable scope, metric or time ambiguities in
+missing_information when a more fundamental missing-data or
+missing-capability blocker already determines that the request is
+UNANSWERABLE.
+
+Those secondary ambiguities may be described in reason or evidence
+when useful, but they should not trigger clarification.
+
+For causal questions, missing_information should state that causal
+diagnosis or causal explanation is not an available capability.
+
+
 1. MATERIAL AMBIGUITY
 
 Ask for clarification only when different reasonable interpretations
@@ -342,9 +398,13 @@ Examples:
 - customer satisfaction data does not exist
 - customer review data does not exist
 - forecasting capability is unavailable
+- causal diagnosis is unavailable
 
 Do not use missing_information for a business ambiguity that could
 instead be resolved by asking the user.
+
+However, if clarification would still leave the request unsupported,
+use missing_information and classify the request as UNANSWERABLE.
 
 
 8. UNSUPPORTED PROXIES
@@ -357,6 +417,9 @@ High sales volume does not automatically mean positive sentiment.
 
 Purchase frequency does not automatically mean loyalty unless a
 documented definition says so.
+
+Observed relationships in transactional data do not prove why a
+business outcome occurred.
 
 
 9. FORECASTING
@@ -416,6 +479,8 @@ When clarification is required:
 - do not ask about harmless presentation details
 - do not combine unrelated questions
 - offer relevant options when useful
+- do not ask for clarification when the request would remain
+  unanswerable even after the user supplied the missing details
 
 
 13. REASON CODE SELECTION
@@ -448,6 +513,8 @@ MISSING_DATA
 
 MISSING_CAPABILITY
 - The requested analytical capability does not exist.
+- This includes unsupported forecasting, prediction, recommendation
+  and causal-diagnosis requests.
 
 UNSAFE_WRITE
 - The request attempts to modify database state.

@@ -10,8 +10,10 @@ from .question_analyzer import (
 from .sql_planner import (
     SQL_GENERATOR_VERSION,
     SQL_PLANNER_VERSION,
+    SQL_REPAIR_VERSION,
     create_sql_plan,
     generate_sql,
+    repair_sql,
 )
 
 from .sql_safety import (
@@ -68,8 +70,11 @@ def run_controlled_pipeline(
         "question_analyzer": QUESTION_ANALYZER_VERSION,
         "sql_planner": SQL_PLANNER_VERSION,
         "sql_generator": SQL_GENERATOR_VERSION,
+        "sql_repair": SQL_REPAIR_VERSION,
         "business_explanation": EXPLANATION_VERSION,
     }
+
+    repair_attempted = False
 
 
     # 1. Analyze the business question
@@ -98,34 +103,28 @@ def run_controlled_pipeline(
             explanation_generated=False,
             prompt_versions=prompt_versions,
             latency_ms=latency_ms,
+            repair_attempted=False,
         )
 
         return ControlledPipelineResult(
             status=analysis.status.value,
             answer=None,
-
             clarification_question=(
                 analysis.clarification_question
             ),
-
             analysis=analysis.model_dump(
                 mode="json"
             ),
-
             sql_plan=None,
             generated_sql=None,
-
             validation_passed=None,
             preflight_passed=None,
             execution_success=None,
-
             result_columns=[],
             result_rows=[],
-
             diagnostics=None,
             response_context=None,
             explanation=None,
-
             audit=audit.model_dump(
                 mode="json"
             ),
@@ -156,12 +155,14 @@ def run_controlled_pipeline(
         perf_counter() - stage_start
     ) * 1000
 
+    active_sql = generated.sql
+
 
     # 4. Deterministic SQL validation
     stage_start = perf_counter()
 
     validation = validate_sql(
-        generated.sql
+        active_sql
     )
 
     latency_ms["sql_validation"] = (
@@ -169,6 +170,42 @@ def run_controlled_pipeline(
     ) * 1000
 
 
+    # One bounded repair attempt for validation failure
+    if not validation.is_valid:
+
+        repair_attempted = True
+
+        failure_details = "; ".join(
+            validation.errors
+        )
+
+        stage_start = perf_counter()
+
+        repaired = repair_sql(
+            plan=sql_plan,
+            failed_sql=active_sql,
+            failure_stage="VALIDATION",
+            failure_details=failure_details,
+        )
+
+        latency_ms["sql_repair"] = (
+            perf_counter() - stage_start
+        ) * 1000
+
+        active_sql = repaired.sql
+
+        stage_start = perf_counter()
+
+        validation = validate_sql(
+            active_sql
+        )
+
+        latency_ms["sql_revalidation"] = (
+            perf_counter() - stage_start
+        ) * 1000
+
+
+    # Stop if validation still fails after one repair
     if not validation.is_valid:
 
         latency_ms["total"] = (
@@ -176,18 +213,25 @@ def run_controlled_pipeline(
         ) * 1000
 
         error = (
-            "SQL failed deterministic validation: "
-            + "; ".join(validation.errors)
+            "SQL failed deterministic validation"
+        )
+
+        if repair_attempted:
+            error += " after one repair attempt"
+
+        error += ": " + "; ".join(
+            validation.errors
         )
 
         audit = build_audit_record(
             question=question,
             analysis=analysis,
             explanation_generated=False,
-            generated_sql=generated.sql,
+            generated_sql=active_sql,
             sql_validation_passed=False,
             prompt_versions=prompt_versions,
             latency_ms=latency_ms,
+            repair_attempted=repair_attempted,
             error=error,
         )
 
@@ -195,28 +239,21 @@ def run_controlled_pipeline(
             status="SQL_VALIDATION_FAILED",
             answer=None,
             clarification_question=None,
-
             analysis=analysis.model_dump(
                 mode="json"
             ),
-
             sql_plan=sql_plan.model_dump(
                 mode="json"
             ),
-
-            generated_sql=generated.sql,
-
+            generated_sql=active_sql,
             validation_passed=False,
             preflight_passed=None,
             execution_success=None,
-
             result_columns=[],
             result_rows=[],
-
             diagnostics=None,
             response_context=None,
             explanation=None,
-
             audit=audit.model_dump(
                 mode="json"
             ),
@@ -227,7 +264,7 @@ def run_controlled_pipeline(
     stage_start = perf_counter()
 
     preflight = preflight_sql(
-        generated.sql
+        active_sql
     )
 
     latency_ms["preflight"] = (
@@ -235,50 +272,161 @@ def run_controlled_pipeline(
     ) * 1000
 
 
+    # One bounded repair attempt for preflight failure,
+    # only when repair has not already been attempted
+    if (
+        not preflight.passed
+        and not repair_attempted
+    ):
+
+        repair_attempted = True
+
+        stage_start = perf_counter()
+
+        repaired = repair_sql(
+            plan=sql_plan,
+            failed_sql=active_sql,
+            failure_stage="PREFLIGHT",
+            failure_details=str(
+                preflight.error
+            ),
+        )
+
+        latency_ms["sql_repair"] = (
+            perf_counter() - stage_start
+        ) * 1000
+
+        active_sql = repaired.sql
+
+
+        # Repaired SQL must pass validation again
+        stage_start = perf_counter()
+
+        validation = validate_sql(
+            active_sql
+        )
+
+        latency_ms["sql_revalidation"] = (
+            perf_counter() - stage_start
+        ) * 1000
+
+
+        if validation.is_valid:
+
+            stage_start = perf_counter()
+
+            preflight = preflight_sql(
+                active_sql
+            )
+
+            latency_ms[
+                "repair_preflight"
+            ] = (
+                perf_counter() - stage_start
+            ) * 1000
+
+        else:
+
+            latency_ms["total"] = (
+                perf_counter() - pipeline_start
+            ) * 1000
+
+            error = (
+                "Repaired SQL failed deterministic "
+                "validation: "
+                + "; ".join(
+                    validation.errors
+                )
+            )
+
+            audit = build_audit_record(
+                question=question,
+                analysis=analysis,
+                explanation_generated=False,
+                generated_sql=active_sql,
+                sql_validation_passed=False,
+                preflight_passed=False,
+                prompt_versions=prompt_versions,
+                latency_ms=latency_ms,
+                repair_attempted=True,
+                error=error,
+            )
+
+            return ControlledPipelineResult(
+                status="SQL_VALIDATION_FAILED",
+                answer=None,
+                clarification_question=None,
+                analysis=analysis.model_dump(
+                    mode="json"
+                ),
+                sql_plan=sql_plan.model_dump(
+                    mode="json"
+                ),
+                generated_sql=active_sql,
+                validation_passed=False,
+                preflight_passed=False,
+                execution_success=None,
+                result_columns=[],
+                result_rows=[],
+                diagnostics=None,
+                response_context=None,
+                explanation=None,
+                audit=audit.model_dump(
+                    mode="json"
+                ),
+            )
+
+
+    # Stop if preflight still fails
     if not preflight.passed:
 
         latency_ms["total"] = (
             perf_counter() - pipeline_start
         ) * 1000
 
+        error = str(
+            preflight.error
+        )
+
+        if repair_attempted:
+            error = (
+                "SQL failed PostgreSQL preflight "
+                "after one repair attempt: "
+                + error
+            )
+
         audit = build_audit_record(
             question=question,
             analysis=analysis,
             explanation_generated=False,
-            generated_sql=generated.sql,
+            generated_sql=active_sql,
             sql_validation_passed=True,
             preflight_passed=False,
             prompt_versions=prompt_versions,
             latency_ms=latency_ms,
-            error=preflight.error,
+            repair_attempted=repair_attempted,
+            error=error,
         )
 
         return ControlledPipelineResult(
             status="PREFLIGHT_FAILED",
             answer=None,
             clarification_question=None,
-
             analysis=analysis.model_dump(
                 mode="json"
             ),
-
             sql_plan=sql_plan.model_dump(
                 mode="json"
             ),
-
-            generated_sql=generated.sql,
-
+            generated_sql=active_sql,
             validation_passed=True,
             preflight_passed=False,
             execution_success=None,
-
             result_columns=[],
             result_rows=[],
-
             diagnostics=None,
             response_context=None,
             explanation=None,
-
             audit=audit.model_dump(
                 mode="json"
             ),
@@ -289,7 +437,7 @@ def run_controlled_pipeline(
     stage_start = perf_counter()
 
     execution = execute_read_only_sql(
-        generated.sql
+        active_sql
     )
 
     latency_ms["execution"] = (
@@ -324,11 +472,12 @@ def run_controlled_pipeline(
             execution=execution,
             diagnostics=diagnostics,
             explanation_generated=False,
-            generated_sql=generated.sql,
+            generated_sql=active_sql,
             sql_validation_passed=True,
             preflight_passed=True,
             prompt_versions=prompt_versions,
             latency_ms=latency_ms,
+            repair_attempted=repair_attempted,
         )
 
         failure_status = (
@@ -341,31 +490,23 @@ def run_controlled_pipeline(
             status=failure_status,
             answer=None,
             clarification_question=None,
-
             analysis=analysis.model_dump(
                 mode="json"
             ),
-
             sql_plan=sql_plan.model_dump(
                 mode="json"
             ),
-
-            generated_sql=generated.sql,
-
+            generated_sql=active_sql,
             validation_passed=True,
             preflight_passed=True,
             execution_success=execution.success,
-
             result_columns=execution.columns,
             result_rows=execution.rows,
-
             diagnostics=diagnostics.model_dump(
                 mode="json"
             ),
-
             response_context=None,
             explanation=None,
-
             audit=audit.model_dump(
                 mode="json"
             ),
@@ -406,11 +547,12 @@ def run_controlled_pipeline(
         execution=execution,
         diagnostics=diagnostics,
         explanation_generated=True,
-        generated_sql=generated.sql,
+        generated_sql=active_sql,
         sql_validation_passed=True,
         preflight_passed=True,
         prompt_versions=prompt_versions,
         latency_ms=latency_ms,
+        repair_attempted=repair_attempted,
     )
 
 
@@ -418,36 +560,27 @@ def run_controlled_pipeline(
         status="SUCCESS",
         answer=explanation.answer,
         clarification_question=None,
-
         analysis=analysis.model_dump(
             mode="json"
         ),
-
         sql_plan=sql_plan.model_dump(
             mode="json"
         ),
-
-        generated_sql=generated.sql,
-
+        generated_sql=active_sql,
         validation_passed=True,
         preflight_passed=True,
         execution_success=True,
-
         result_columns=execution.columns,
         result_rows=execution.rows,
-
         diagnostics=diagnostics.model_dump(
             mode="json"
         ),
-
         response_context=response_context.model_dump(
             mode="json"
         ),
-
         explanation=explanation.model_dump(
             mode="json"
         ),
-
         audit=audit.model_dump(
             mode="json"
         ),

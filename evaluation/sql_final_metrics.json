@@ -1,0 +1,26 @@
+{
+  "total_answerable_cases": 25,
+  "first_pass": {
+    "automated_matches": 22,
+    "automated_match_rate": 88.0,
+    "semantic_matches_after_review": 24,
+    "semantic_match_rate": 96.0
+  },
+  "post_hardening": {
+    "automated_matches": 24,
+    "automated_match_rate": 96.0,
+    "semantic_matches_after_review": 25,
+    "semantic_match_rate": 100.0,
+    "validation_failures": 0,
+    "preflight_failures": 0,
+    "execution_failures": 0
+  },
+  "manual_review": {
+    "case_id": "COMPLEX_009",
+    "verdict": "SEMANTIC_MATCH",
+    "canonical_rows": 187,
+    "generated_rows": 187,
+    "same_customer_ids": true,
+    "difference": "Generated SQL omitted order_count from the output projection but used it correctly in HAVING COUNT(DISTINCT order_id) >= 3."
+  }
+}

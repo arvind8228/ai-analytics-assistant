@@ -38,6 +38,54 @@ FORBIDDEN_SQL_NODES = (
 )
 
 
+FORBIDDEN_FUNCTION_NAMES = {
+    # Delay / resource abuse
+    "pg_sleep",
+    "pg_sleep_for",
+    "pg_sleep_until",
+
+    # Server-side file access
+    "pg_read_file",
+    "pg_read_binary_file",
+    "pg_stat_file",
+
+    # Server directory inspection
+    "pg_ls_dir",
+    "pg_ls_logdir",
+    "pg_ls_waldir",
+    "pg_ls_archive_statusdir",
+    "pg_ls_logicalmapdir",
+    "pg_ls_logicalsnapdir",
+    "pg_ls_replslotdir",
+    "pg_ls_tmpdir",
+
+    # Backend / server control
+    "pg_cancel_backend",
+    "pg_terminate_backend",
+    "pg_reload_conf",
+    "pg_rotate_logfile",
+    "pg_switch_wal",
+    "pg_promote",
+
+    # Configuration changes
+    "set_config",
+
+    # Advisory locks
+    "pg_advisory_lock",
+    "pg_advisory_lock_shared",
+    "pg_try_advisory_lock",
+    "pg_try_advisory_lock_shared",
+    "pg_advisory_xact_lock",
+    "pg_advisory_xact_lock_shared",
+    "pg_try_advisory_xact_lock",
+    "pg_try_advisory_xact_lock_shared",
+
+    # Large-object server file operations
+    "lo_import",
+    "lo_export",
+}
+
+
 PREFLIGHT_STATEMENT_TIMEOUT_MS = 5000
 PREFLIGHT_LOCK_TIMEOUT_MS = 2000
 
@@ -74,6 +122,20 @@ class SQLExecutionResult(BaseModel):
     rows_returned: int
     result_truncated: bool
     error: str | None
+
+
+def get_function_name(
+    function: exp.Func,
+) -> str:
+    # PostgreSQL-specific functions such as
+    # pg_sleep() are often parsed as Anonymous nodes.
+    if isinstance(
+        function,
+        exp.Anonymous,
+    ):
+        return function.name.lower()
+
+    return function.sql_name().lower()
 
 
 def validate_sql(
@@ -118,7 +180,7 @@ def validate_sql(
 
     statement_type = type(tree).__name__
 
-    # V1 only allows SELECT queries
+    # Only SELECT queries are allowed
     if not isinstance(tree, exp.Select):
         errors.append(
             "Only SELECT queries are allowed."
@@ -130,6 +192,22 @@ def validate_sql(
             errors.append(
                 f"Forbidden SQL operation detected: "
                 f"{forbidden_type.__name__}."
+            )
+
+    # Reject dangerous or inappropriate PostgreSQL
+    # functions anywhere in the query tree
+    for function in tree.find_all(exp.Func):
+        function_name = get_function_name(
+            function
+        )
+
+        if (
+            function_name
+            in FORBIDDEN_FUNCTION_NAMES
+        ):
+            errors.append(
+                "Forbidden SQL function detected: "
+                f"{function_name}."
             )
 
     # Collect CTE names so they are not mistaken
@@ -156,7 +234,7 @@ def validate_sql(
             table_name
         )
 
-        # V1 only allows the controlled public schema
+        # Only the controlled public schema is allowed
         if (
             schema_name
             and schema_name != "public"

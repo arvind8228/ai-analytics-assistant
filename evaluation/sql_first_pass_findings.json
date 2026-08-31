@@ -1,0 +1,23 @@
+[
+  {
+    "case_id": "COMPLEX_006",
+    "initial_verdict": "RESULT_MISMATCH",
+    "adjudicated_verdict": "CORRECT",
+    "failure_type": "EVALUATOR_FALSE_NEGATIVE",
+    "reason": "The canonical query returned category_id, category_name and return rate, while the generated query returned category_name and return rate. All category names and business metric values matched."
+  },
+  {
+    "case_id": "COMPLEX_007",
+    "initial_verdict": "RESULT_MISMATCH",
+    "adjudicated_verdict": "CORRECT",
+    "failure_type": "EVALUATOR_FALSE_NEGATIVE",
+    "reason": "The canonical and generated queries returned identical gross-sales values, but used semantically equivalent labels such as PROMOTION versus promoted."
+  },
+  {
+    "case_id": "COMPLEX_008",
+    "initial_verdict": "TRUNCATED_REVIEW",
+    "adjudicated_verdict": "INCORRECT",
+    "failure_type": "SQL_SEMANTIC_ERROR",
+    "reason": "The LEFT JOIN anti-join logic retained products that had non-matching historical order rows even when the same product also had completed July sales. The canonical NOT EXISTS query returned 12 products while the generated query exceeded the 200-row production result limit."
+  }
+]

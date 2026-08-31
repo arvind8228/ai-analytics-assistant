@@ -15,8 +15,9 @@ from .question_analyzer import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-SQL_PLANNER_VERSION = "sql_planner_v1"
-SQL_GENERATOR_VERSION = "sql_generator_v1"
+SQL_PLANNER_VERSION = "sql_planner_v2"
+SQL_GENERATOR_VERSION = "sql_generator_v2"
+SQL_REPAIR_VERSION = "sql_repair_v1"
 
 
 class JoinType(str, Enum):
@@ -306,7 +307,39 @@ preserve that interpretation rather than recording it again as a
 new planning assumption.
 
 
-12. SAFETY
+12. NEGATIVE EXISTENCE AND ABSENCE
+
+Some questions ask for entities for which no related record satisfies
+a set of conditions.
+
+Examples include:
+- products with no completed sales in a period
+- customers with no returns
+- stores without completed orders
+- entities that never had a matching related event
+
+For these questions:
+
+- make the absence requirement explicit in objective
+- include the parent and related tables in required_tables
+- include the real relationships needed to test existence
+- use filters and time_period to define exactly which related records
+  would disqualify the parent entity
+
+The joins list describes the relationships needed to evaluate the
+condition. It does not require the SQL generator to express every
+relationship as a top-level JOIN.
+
+Do not plan absence logic that can keep a parent entity merely because
+it has some unrelated or non-matching child rows.
+
+The intended meaning must be:
+
+return the parent entity only when no related row exists that satisfies
+all of the disqualifying conditions.
+
+
+13. SAFETY
 
 This planner is strictly read-only.
 
@@ -451,7 +484,54 @@ Use only joins required by the approved plan.
 Use real relationships from the database schema.
 
 
-7. FILTERS
+7. NEGATIVE EXISTENCE AND ANTI-JOIN LOGIC
+
+When the approved plan asks for entities that have no related records
+matching a condition, implement the absence test safely.
+
+Prefer a correlated NOT EXISTS subquery.
+
+The NOT EXISTS subquery must contain all conditions that define the
+disqualifying related record, including relevant:
+- status filters
+- date filters
+- entity relationships
+- other approved restrictions
+
+Example pattern:
+
+SELECT parent_columns
+FROM parent_table AS p
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM child_table AS c
+    WHERE c.parent_id = p.parent_id
+      AND matching_conditions
+);
+
+Do not implement multi-level absence logic using a chain of LEFT JOINs
+followed only by:
+
+WHERE final_child.id IS NULL
+
+when the same parent can have both matching and non-matching related
+rows.
+
+That pattern can incorrectly retain a parent because one unrelated
+child row fails to match even though another child row satisfies the
+condition.
+
+A LEFT JOIN anti-join is acceptable only when the right-hand relation
+has already been restricted to exactly the records whose existence
+would disqualify the parent.
+
+For absence questions, the joins in the structured plan describe the
+required relationships. They do not force those relationships to
+appear as top-level joins if a correlated NOT EXISTS expression is
+semantically safer.
+
+
+8. FILTERS
 
 Translate structured filters into PostgreSQL predicates.
 
@@ -459,7 +539,7 @@ Preserve documented values exactly, including lowercase status
 values such as 'completed' and 'cancelled'.
 
 
-8. TIME PERIODS
+9. TIME PERIODS
 
 Use the approved start and end dates exactly.
 
@@ -467,7 +547,7 @@ For DATE columns, use an inclusive date range unless the plan
 specifies otherwise.
 
 
-9. AGGREGATION
+10. AGGREGATION
 
 Use aggregation, GROUP BY and ordering only when required by
 the plan.
@@ -476,12 +556,12 @@ For order_count, preserve the documented meaning of distinct
 completed orders.
 
 
-10. RESULT LIMIT
+11. RESULT LIMIT
 
 Apply LIMIT only when the approved plan contains a limit.
 
 
-11. OUTPUT
+12. OUTPUT
 
 Return only the structured GeneratedSQL response.
 
@@ -524,6 +604,152 @@ BUSINESS GLOSSARY
     if response.output_parsed is None:
         raise ValueError(
             "SQL generator returned no parsed output."
+        )
+
+    return response.output_parsed
+
+
+def repair_sql(
+    plan: SQLPlan,
+    failed_sql: str,
+    failure_stage: str,
+    failure_details: str,
+) -> GeneratedSQL:
+
+    schema_context, business_glossary = (
+        load_sql_context()
+    )
+
+    instructions = f"""
+You are the bounded SQL repair layer of an AI analytics assistant.
+
+A PostgreSQL query was generated from an APPROVED structured SQL plan,
+but it failed deterministic SQL validation or PostgreSQL EXPLAIN
+preflight.
+
+Your task is to produce one corrected PostgreSQL query.
+
+This is the ONLY repair attempt.
+
+
+REPAIR RULES
+
+1. APPROVED PLAN
+
+The structured SQL plan remains the source of truth.
+
+Do not:
+- reinterpret the original business question
+- change the requested metric
+- change the requested filters
+- change the requested time period
+- introduce new business assumptions
+
+
+2. FAILURE FEEDBACK
+
+Use the supplied failed SQL, failure stage and failure details only to
+correct the technical problem.
+
+Do not weaken or bypass the safety controls that rejected the query.
+
+
+3. READ ONLY
+
+Return exactly one read-only PostgreSQL query.
+
+Allowed top-level forms:
+- SELECT
+- WITH ... SELECT
+
+Never generate:
+- INSERT
+- UPDATE
+- DELETE
+- DROP
+- ALTER
+- CREATE
+- TRUNCATE
+- MERGE
+- CALL
+- COPY
+- transaction commands
+- administrative commands
+
+
+4. DATABASE SCHEMA
+
+Use only tables and columns that exist in the supplied schema.
+
+Do not invent schema objects.
+
+
+5. BUSINESS DEFINITIONS
+
+Preserve the documented business glossary exactly.
+
+
+6. NEGATIVE EXISTENCE
+
+When the approved plan requires entities for which no related row
+matches a condition, prefer a correlated NOT EXISTS query.
+
+All conditions that define the disqualifying related row must stay
+inside the NOT EXISTS test.
+
+
+7. OUTPUT
+
+Return only the structured GeneratedSQL response.
+
+The sql field must contain exactly one PostgreSQL query.
+
+Do not include:
+- Markdown
+- explanations
+- comments
+- multiple alternatives
+
+
+DATABASE SCHEMA
+
+{schema_context}
+
+
+BUSINESS GLOSSARY
+
+{json.dumps(business_glossary, indent=2)}
+""".strip()
+
+    repair_context = {
+        "approved_sql_plan": plan.model_dump(
+            mode="json"
+        ),
+        "failed_sql": failed_sql,
+        "failure_stage": failure_stage,
+        "failure_details": failure_details,
+    }
+
+    client = OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        timeout=20.0,
+        max_retries=2,
+    )
+
+    response = client.responses.parse(
+        model=os.getenv("OPENAI_MODEL"),
+        instructions=instructions,
+        input=json.dumps(
+            repair_context,
+            indent=2,
+        ),
+        text_format=GeneratedSQL,
+        store=False,
+    )
+
+    if response.output_parsed is None:
+        raise ValueError(
+            "SQL repair returned no parsed output."
         )
 
     return response.output_parsed
