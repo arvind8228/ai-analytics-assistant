@@ -36,7 +36,7 @@ with column_3:
 with column_4:
     st.metric(
         "Regression tests",
-        "22 / 22",
+        "32 / 32",
     )
 
 
