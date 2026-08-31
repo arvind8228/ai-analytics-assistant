@@ -1,5 +1,12 @@
 {
     "random_seed": 42,
+
+    "currency": {
+        "code": "INR",
+        "symbol": "₹",
+        "decimal_places": 2
+    },
+
     "dataset_size": {
         "customers": 5000,
         "stores": 6,
@@ -8,11 +15,13 @@
         "orders": 25000,
         "promotions": 15
     },
+
     "date_range": {
         "start_date": "2025-01-01",
         "end_date": "2026-07-31",
         "analysis_reference_date": "2026-08-01"
     },
+
     "generation_rules": {
         "cancelled_order_rate": 0.08,
         "promotion_usage_rate": 0.25,
@@ -21,5 +30,15 @@
         "max_items_per_order": 5,
         "min_item_quantity": 1,
         "max_item_quantity": 3
+    },
+
+    "analytics_rules": {
+        "default_ranking_limit": 10,
+        "undefined_relative_periods": [
+            "recently"
+        ],
+        "allow_promotion_comparison": true,
+        "allow_promotion_causal_claims": false,
+        "return_rate_supported": false
     }
 }

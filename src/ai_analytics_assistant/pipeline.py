@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from time import perf_counter
 
 from pydantic import BaseModel, ConfigDict
@@ -28,6 +29,7 @@ from .result_processing import (
     build_response_context,
     diagnose_result,
     explain_result,
+    stream_explain_result,
 )
 
 
@@ -60,6 +62,8 @@ class ControlledPipelineResult(BaseModel):
 
 def run_controlled_pipeline(
     question: str,
+    stream_explanation: bool = False,
+    on_explanation_delta: Callable[[str], None] | None = None,
 ) -> ControlledPipelineResult:
 
     pipeline_start = perf_counter()
@@ -520,15 +524,27 @@ def run_controlled_pipeline(
     )
 
 
-    # 9. Generate grounded business explanation
+    # 9. Generate grounded business explanation.
+    # Streaming is optional and only begins after every
+    # upstream control has passed.
     stage_start = perf_counter()
 
-    explanation = explain_result(
-        question,
-        analysis,
-        execution,
-        diagnostics,
-    )
+    if stream_explanation:
+        explanation = stream_explain_result(
+            question,
+            analysis,
+            execution,
+            diagnostics,
+            on_delta=on_explanation_delta,
+        )
+
+    else:
+        explanation = explain_result(
+            question,
+            analysis,
+            execution,
+            diagnostics,
+        )
 
     latency_ms["explanation"] = (
         perf_counter() - stage_start

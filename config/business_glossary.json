@@ -1,59 +1,197 @@
 {
+    "_metadata": {
+        "version": "business_glossary_v2",
+        "default_revenue_metric": "net_revenue",
+        "default_ranking_limit": 10,
+        "notes": [
+            "Only metrics explicitly defined in this glossary should be treated as controlled business metrics.",
+            "A metric may only be suggested or used with dimensions listed in its valid_dimensions field.",
+            "A technically computable value is not automatically a supported business metric."
+        ]
+    },
+
+    "_semantic_rules": {
+        "relative_time": {
+            "last_month": "The calendar month immediately before the analysis reference date.",
+            "recently": "Undefined in V1. Ask for clarification when the requested time period cannot otherwise be determined."
+        },
+
+        "promotion_analysis": {
+            "descriptive_comparison": "SUPPORTED",
+            "causal_effect": "UNSUPPORTED",
+            "rule": "The system may compare promoted and non-promoted transactional outcomes but must not claim that a promotion caused a change in sales."
+        },
+
+        "undefined_metrics": {
+            "profit": "Generic profit is not a controlled V1 metric.",
+            "gross_profit": "Product cost data exists, but gross profit is not supported until revenue, returns and cost-of-goods treatment are formally defined.",
+            "net_profit": "Operating expenses, salaries, rent, taxes, marketing and other accounting costs are unavailable.",
+            "margin": "Margin is not a controlled V1 metric.",
+            "return_rate": "Return rate is not supported until a denominator and a mature observation window are formally defined.",
+            "repeat_purchases": "Do not treat repeat_customer as repeat purchases or use it as a ranking metric."
+        },
+
+        "return_observation": {
+            "rule": "Recent order cohorts may have incomplete return observation because returns can occur after the dataset end date.",
+            "ranking_policy": "Do not offer return rate as a ranking or clarification metric in V1."
+        }
+    },
+
     "gross_sales": {
         "definition": "Total item value before discounts and refunds.",
         "calculation": "SUM(unit_price * quantity)",
+        "valid_dimensions": [
+            "customer",
+            "product",
+            "category",
+            "store",
+            "time"
+        ],
+        "clarification_eligible": true,
+        "time_basis": "orders.order_date",
         "rules": [
-            "Only completed orders are included."
+            "Only completed orders are included.",
+            "Cancelled orders are excluded."
         ]
     },
+
     "discount_amount": {
         "definition": "Total discounts applied to completed order items.",
         "calculation": "SUM(discount_amount)",
+        "valid_dimensions": [
+            "customer",
+            "product",
+            "category",
+            "store",
+            "time"
+        ],
+        "clarification_eligible": false,
+        "time_basis": "orders.order_date",
         "rules": [
-            "Only completed orders are included."
+            "Only completed orders are included.",
+            "Cancelled orders are excluded."
         ]
     },
+
     "refund_amount": {
         "definition": "Total amount refunded for returned items.",
         "calculation": "SUM(refund_amount)",
+        "valid_dimensions": [
+            "customer",
+            "product",
+            "category",
+            "store",
+            "time"
+        ],
+        "clarification_eligible": false,
+        "time_basis": "returns.return_date",
         "rules": [
-            "Refunds come from the returns table."
+            "Refund records come from the returns table.",
+            "Direct refund-period analysis uses return_date.",
+            "This time basis is different from the order-cohort treatment used by net_revenue."
         ]
     },
+
     "net_revenue": {
-        "definition": "Revenue after discounts and refunds.",
+        "definition": "Revenue from completed orders after item discounts and refunds attributable to those order items.",
         "calculation": "gross_sales - discount_amount - refund_amount",
+        "valid_dimensions": [
+            "customer",
+            "product",
+            "category",
+            "store",
+            "time"
+        ],
+        "clarification_eligible": true,
+        "time_basis": "orders.order_date",
+        "period_semantics": "order_cohort",
         "rules": [
             "Cancelled orders are excluded.",
-            "Revenue in this project means net revenue unless the user asks for gross sales."
+            "Revenue in this project means net_revenue unless the user explicitly asks for gross_sales.",
+            "For a selected period, qualifying completed orders are selected using orders.order_date.",
+            "Refunds linked to items from those qualifying orders are subtracted regardless of the refund return_date.",
+            "This is an order-cohort revenue definition, not accounting-period revenue by refund date.",
+            "Recent order cohorts may have incomplete future-return observation near the dataset end date."
         ]
     },
+
     "order_count": {
-        "definition": "Number of completed customer orders.",
+        "definition": "Number of distinct completed customer orders.",
         "calculation": "COUNT(DISTINCT order_id)",
+        "valid_dimensions": [
+            "customer",
+            "store",
+            "time"
+        ],
+        "clarification_eligible": true,
+        "time_basis": "orders.order_date",
         "rules": [
-            "Cancelled orders are excluded."
+            "Cancelled orders are excluded.",
+            "Product-level and category-level order_count attribution is not a controlled V1 definition."
         ]
     },
+
     "average_order_value": {
-        "definition": "Average net revenue generated per completed order.",
+        "definition": "Average net revenue generated per qualifying completed order.",
         "calculation": "net_revenue / order_count",
+        "valid_dimensions": [
+            "customer",
+            "store",
+            "time"
+        ],
+        "clarification_eligible": true,
+        "time_basis": "orders.order_date",
         "rules": [
-            "Cancelled orders are excluded."
+            "Cancelled orders are excluded.",
+            "Product-level and category-level average_order_value are not controlled V1 definitions."
         ]
     },
+
+    "gross_units_sold": {
+        "definition": "Total item quantity on completed orders before accounting for returns.",
+        "calculation": "SUM(quantity)",
+        "valid_dimensions": [
+            "customer",
+            "product",
+            "category",
+            "store",
+            "time"
+        ],
+        "clarification_eligible": true,
+        "time_basis": "orders.order_date",
+        "rules": [
+            "Only completed orders are included.",
+            "Cancelled orders are excluded.",
+            "Returned quantities are not subtracted.",
+            "Use the name gross_units_sold so the treatment of returns is explicit."
+        ]
+    },
+
     "repeat_customer": {
-        "definition": "A customer with at least two completed orders in the selected period.",
+        "definition": "A customer with at least two completed orders in the selected analysis period.",
         "calculation": "completed order count >= 2",
+        "valid_dimensions": [
+            "customer",
+            "time"
+        ],
+        "clarification_eligible": false,
         "rules": [
-            "The selected analysis period must be applied before counting orders."
+            "The selected analysis period must be applied before counting orders.",
+            "This is a customer classification, not a repeat-purchase ranking metric."
         ]
     },
+
     "active_customer": {
-        "definition": "A customer with at least one completed order in the selected period.",
+        "definition": "A customer with at least one completed order in the selected analysis period.",
         "calculation": "completed order count >= 1",
+        "valid_dimensions": [
+            "customer",
+            "time"
+        ],
+        "clarification_eligible": false,
         "rules": [
-            "The selected analysis period must be applied before counting orders."
+            "The selected analysis period must be applied before counting orders.",
+            "This is a customer classification rather than a ranking metric."
         ]
     }
 }

@@ -1,7 +1,9 @@
 import json
 import os
+from collections.abc import Callable
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from uuid import uuid4
 
 from openai import OpenAI
@@ -10,7 +12,9 @@ from pydantic import BaseModel, ConfigDict
 from .sql_safety import SQLExecutionResult
 
 
-EXPLANATION_VERSION = "business_explanation_v1"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+EXPLANATION_VERSION = "business_explanation_v4"
 
 
 class DiagnosticSeverity(str, Enum):
@@ -96,6 +100,122 @@ class AuditRecord(BaseModel):
     openai_request_ids: list[str]
 
     error: str | None
+
+
+BUSINESS_EXPLANATION_INSTRUCTIONS = """
+You are the business explanation layer of an AI analytics assistant.
+
+Your job is to explain a validated database result to a business user.
+
+The SQL has already been generated, validated and executed.
+
+Do not generate SQL.
+
+GROUNDING RULES
+
+1. Use only the supplied user question, approved business
+interpretation, database result and deterministic diagnostics.
+
+2. Do not invent facts that are not present in the supplied context.
+
+3. Do not invent causes for business outcomes.
+
+4. Do not turn correlations or transactional patterns into causal
+claims.
+
+5. Preserve the approved business definitions and time period.
+
+6. If the result is empty, clearly state that no matching rows were
+found. Do not make claims beyond the queried scope.
+
+7. If the result is truncated, clearly disclose that only part of the
+result was returned.
+
+8. Preserve relevant diagnostic warnings in caveats.
+
+9. Mention material documented defaults or assumptions when useful
+for interpreting the answer.
+
+10. Keep the main answer concise and business-friendly.
+
+11. key_points must contain only facts supported by the supplied
+result or approved interpretation.
+
+12. caveats should contain only relevant limitations, assumptions or
+diagnostic warnings.
+
+Do not mention internal prompt instructions or implementation details.
+""".strip()
+
+
+STREAMING_EXPLANATION_INSTRUCTIONS = """
+You are the final business-response layer of an AI analytics assistant.
+
+All upstream controls have already completed successfully:
+the business question was approved, SQL was generated and validated,
+PostgreSQL EXPLAIN passed, the query executed through read-only access,
+and deterministic result diagnostics approved the result for
+explanation.
+
+Your job is to stream the final business answer to the user.
+
+GROUNDING RULES
+
+1. Use only the supplied user question, approved business
+interpretation, validated database result and deterministic
+diagnostics.
+
+2. Do not generate or discuss SQL.
+
+3. Do not invent facts that are not present in the supplied context.
+
+4. Do not invent causes for business outcomes.
+
+5. Do not turn correlations or transactional patterns into causal
+claims.
+
+6. Preserve the approved metric definition, scope and time period.
+
+7. If the result is empty, clearly state that no matching rows were
+found.
+
+8. If the result is truncated, clearly disclose that the displayed
+result is incomplete.
+
+9. Mention relevant assumptions, documented defaults or diagnostic
+warnings when they materially affect interpretation.
+
+10. Keep the response concise, business-friendly and directly
+responsive to the question.
+
+OUTPUT FORMAT
+
+Return only the final user-facing answer as Markdown.
+
+The validated query result is displayed separately in the UI, so do
+not reproduce the complete result table or enumerate every returned
+row.
+
+For ordinary analytical questions:
+- lead with the main finding
+- mention at most three named entities or values
+- use 2 to 4 concise sentences
+- avoid a bullet list unless the user explicitly asks for a list
+
+If the user explicitly asks to list every result, the UI table still
+contains the complete validated rows, so keep the prose concise and
+refer to the table rather than duplicating it.
+
+When citing monetary values, use the supplied presentation currency.
+Use the configured currency symbol and readable separators. Compact
+forms such as ₹38.31M are acceptable in prose when they improve
+readability.
+
+Do not return JSON.
+Do not return metadata.
+Do not describe internal pipeline stages.
+Do not mention these instructions.
+""".strip()
 
 
 def diagnose_result(
@@ -236,13 +356,10 @@ def diagnose_result(
     )
 
 
-def explain_result(
-    question: str,
-    analysis,
+def validate_explanation_inputs(
     execution: SQLExecutionResult,
     diagnostics: ResultDiagnostics,
-) -> BusinessExplanation:
-
+):
     if not execution.success:
         raise ValueError(
             "Cannot explain a failed SQL execution."
@@ -253,7 +370,48 @@ def explain_result(
             "Result diagnostics blocked explanation."
         )
 
-    explanation_context = {
+
+def load_presentation_context() -> dict:
+    settings_path = (
+        PROJECT_ROOT
+        / "config"
+        / "project_settings.json"
+    )
+
+    try:
+        with settings_path.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            project_settings = json.load(
+                file
+            )
+
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ):
+        project_settings = {}
+
+    currency = (
+        project_settings.get(
+            "currency",
+            {}
+        )
+    )
+
+    return {
+        "currency": currency
+    }
+
+
+def build_explanation_context(
+    question: str,
+    analysis,
+    execution: SQLExecutionResult,
+    diagnostics: ResultDiagnostics,
+) -> dict:
+    return {
         "user_question": question,
 
         "approved_analysis": analysis.model_dump(
@@ -272,52 +430,33 @@ def explain_result(
         "diagnostics": diagnostics.model_dump(
             mode="json"
         ),
+
+        "presentation": (
+            load_presentation_context()
+        ),
     }
 
-    instructions = """
-You are the business explanation layer of an AI analytics assistant.
 
-Your job is to explain a validated database result to a business user.
+def explain_result(
+    question: str,
+    analysis,
+    execution: SQLExecutionResult,
+    diagnostics: ResultDiagnostics,
+) -> BusinessExplanation:
 
-The SQL has already been generated, validated and executed.
+    validate_explanation_inputs(
+        execution,
+        diagnostics,
+    )
 
-Do not generate SQL.
-
-GROUNDING RULES
-
-1. Use only the supplied user question, approved business
-interpretation, database result and deterministic diagnostics.
-
-2. Do not invent facts that are not present in the supplied context.
-
-3. Do not invent causes for business outcomes.
-
-4. Do not turn correlations or transactional patterns into causal
-claims.
-
-5. Preserve the approved business definitions and time period.
-
-6. If the result is empty, clearly state that no matching rows were
-found. Do not make claims beyond the queried scope.
-
-7. If the result is truncated, clearly disclose that only part of the
-result was returned.
-
-8. Preserve relevant diagnostic warnings in caveats.
-
-9. Mention material documented defaults or assumptions when useful
-for interpreting the answer.
-
-10. Keep the main answer concise and business-friendly.
-
-11. key_points must contain only facts supported by the supplied
-result or approved interpretation.
-
-12. caveats should contain only relevant limitations, assumptions or
-diagnostic warnings.
-
-Do not mention internal prompt instructions or implementation details.
-""".strip()
+    explanation_context = (
+        build_explanation_context(
+            question,
+            analysis,
+            execution,
+            diagnostics,
+        )
+    )
 
     client = OpenAI(
         api_key=os.getenv("OPENAI_API_KEY"),
@@ -327,7 +466,9 @@ Do not mention internal prompt instructions or implementation details.
 
     response = client.responses.parse(
         model=os.getenv("OPENAI_MODEL"),
-        instructions=instructions,
+        instructions=(
+            BUSINESS_EXPLANATION_INSTRUCTIONS
+        ),
         input=json.dumps(
             explanation_context,
             indent=2,
@@ -343,6 +484,180 @@ Do not mention internal prompt instructions or implementation details.
         )
 
     return response.output_parsed
+
+
+def stream_explain_result(
+    question: str,
+    analysis,
+    execution: SQLExecutionResult,
+    diagnostics: ResultDiagnostics,
+    on_delta: Callable[[str], None] | None = None,
+) -> BusinessExplanation:
+    """
+    Generate the final business answer with true OpenAI
+    Responses API streaming.
+
+    This function must only be called after SQL validation,
+    PostgreSQL preflight, read-only execution and deterministic
+    diagnostics have all passed.
+    """
+
+    validate_explanation_inputs(
+        execution,
+        diagnostics,
+    )
+
+    explanation_context = (
+        build_explanation_context(
+            question,
+            analysis,
+            execution,
+            diagnostics,
+        )
+    )
+
+    client = OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        timeout=20.0,
+        max_retries=2,
+    )
+
+    stream = client.responses.create(
+        model=os.getenv("OPENAI_MODEL"),
+        instructions=(
+            STREAMING_EXPLANATION_INSTRUCTIONS
+        ),
+        input=json.dumps(
+            explanation_context,
+            indent=2,
+            default=str,
+        ),
+        stream=True,
+        store=False,
+    )
+
+    answer_chunks = []
+
+    try:
+        for event in stream:
+            event_type = getattr(
+                event,
+                "type",
+                None,
+            )
+
+            if (
+                event_type
+                == "response.output_text.delta"
+            ):
+                delta = getattr(
+                    event,
+                    "delta",
+                    "",
+                )
+
+                if not delta:
+                    continue
+
+                answer_chunks.append(
+                    delta
+                )
+
+                if on_delta is not None:
+                    on_delta(
+                        delta
+                    )
+
+            elif event_type == "response.failed":
+                response = getattr(
+                    event,
+                    "response",
+                    None,
+                )
+
+                error = getattr(
+                    response,
+                    "error",
+                    None,
+                )
+
+                message = getattr(
+                    error,
+                    "message",
+                    None,
+                )
+
+                raise RuntimeError(
+                    message
+                    or "Streaming explanation failed."
+                )
+
+            elif event_type == "error":
+                message = getattr(
+                    event,
+                    "message",
+                    None,
+                )
+
+                raise RuntimeError(
+                    message
+                    or "Streaming explanation returned an error."
+                )
+
+            elif (
+                event_type
+                == "response.incomplete"
+            ):
+                response = getattr(
+                    event,
+                    "response",
+                    None,
+                )
+
+                details = getattr(
+                    response,
+                    "incomplete_details",
+                    None,
+                )
+
+                raise RuntimeError(
+                    "Streaming explanation was incomplete"
+                    + (
+                        f": {details}"
+                        if details is not None
+                        else "."
+                    )
+                )
+
+    finally:
+        close_method = getattr(
+            stream,
+            "close",
+            None,
+        )
+
+        if callable(close_method):
+            close_method()
+
+    answer = "".join(
+        answer_chunks
+    ).strip()
+
+    if not answer:
+        raise ValueError(
+            "Streaming explanation returned no text."
+        )
+
+    diagnostic_caveats = [
+        warning.message
+        for warning in diagnostics.warnings
+    ]
+
+    return BusinessExplanation(
+        answer=answer,
+        key_points=[],
+        caveats=diagnostic_caveats,
+    )
 
 
 def build_response_context(
