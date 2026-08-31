@@ -4,6 +4,8 @@ A controlled natural-language analytics application built with Python, PostgreSQ
 
 Instead of sending every question directly to a Text-to-SQL model, the system first checks whether the request is clear, supported by the available data, and safe to execute. Ambiguous questions can trigger clarification, unsupported requests are stopped early, and generated SQL must pass deterministic checks before it can reach the database.
 
+**Live demo:** [controlled-analytics-assistant.streamlit.app](https://controlled-analytics-assistant.streamlit.app/)
+
 > **A syntactically valid SQL query can still answer the wrong business question.**
 
 This project was built around that problem.
@@ -283,6 +285,24 @@ A view for presenting evaluation results and system behaviour.
 
 A view explaining the controlled analytics pipeline and the role of each stage.
 
+## Deployment
+
+The application is deployed on Streamlit Community Cloud:
+
+**Live demo:** [controlled-analytics-assistant.streamlit.app](https://controlled-analytics-assistant.streamlit.app/)
+
+The deployed application connects to a hosted Neon PostgreSQL database containing the same synthetic retail dataset used during local development.
+
+Database access is separated between environments:
+
+- local development uses the `analytics_app` PostgreSQL role
+- the deployed application uses a separate `analytics_reader` role
+- `analytics_reader` is configured with read-only transactions and `SELECT` access to the analytics tables
+- write operations are blocked at both the application and database layers
+- database credentials and the OpenAI API key are stored as Streamlit Cloud secrets and are not committed to the repository
+
+The live deployment was smoke-tested with answerable, ambiguous, and unsafe requests before publishing the link.
+
 ## Example behaviours
 
 ### Clear question
@@ -555,9 +575,9 @@ The aim of V1 is to make the supported analytics path explicit and controlled ra
 
 Possible next steps include:
 
-- support for additional datasets through separate semantic contracts
-- Docker packaging
-- broader deterministic regression coverage
+- package the application with Docker
+- support additional datasets through separate semantic contracts
+- expand deterministic regression coverage
 - evaluate the system on a larger benchmark
 
 ## Development approach
